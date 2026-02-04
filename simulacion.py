@@ -79,9 +79,10 @@ def formatear_tiempo(tiempo_minutos: float) -> str:
 # ------------------------------------------------------------
 @dataclass
 class Trabajo:
-    tiempo_arribo_min: float
+    tiempo_arribo_minutos: float
     tipo_servicio: str                 # "IT" | "TEC" | "DEV"
-    duracion_servicio_min: float       # sorteada al ARRIBO
+    duracion_servicio_minutos: float       # sorteada al ARRIBO o PENDIENTE
+    tomadoPorDev: bool = False          # si fue tomado por DEV
 
 
 @dataclass
@@ -138,6 +139,14 @@ class SimuladorMesaAyuda:
         self.AGIT: List[Optional[Trabajo]] = [None] * cantidad_operadores_it
         self.AGTEC: List[Optional[Trabajo]] = [None] * cantidad_operadores_tecnico
         self.AGDEVS: List[Optional[Trabajo]] = [None] * cantidad_operadores_dev
+        self.TrabajoPendiente: List[Trabajo] = []
+        self.DEVATENCIONIT = 0 
+        self.DEVATENCIONTEC = 0 
+        self.PERDIDATIEMPOMAS30IT = 0
+        self.PERDIDATIEMPOMAS30TEC = 0
+        self.TIPO_EN_SERVICIO_DEV: List[Optional[str]] = [None] * cantidad_operadores_dev
+
+
 
         # Métricas
         self.perdidos_por_tipo = {"IT": 0, "TEC": 0, "DEV": 0}
@@ -198,15 +207,21 @@ class SimuladorMesaAyuda:
     # -----------------------------
     # Reglas: libre / agendar
     # -----------------------------
-    def _buscar_operador_libre(self, tipo_servicio: str) -> int:
+    def _buscar_operador_libre(self, trabajo: Trabajo) -> int:
         """
         Libre SOLO si:
         - TPS == HV (no está atendiendo)
         - y NO tiene trabajo asignado (AG == None)
         """
+        tipo_servicio = trabajo.tipo_servicio
         if tipo_servicio == "IT":
             for i in range(self.cantidad_operadores_it):
                 if self.TPSIT[i] == HORIZONTE_VACIO and self.AGIT[i] is None:
+                    return i
+            for i in range(self.cantidad_operadores_dev):
+                if self.TPSDEVS[i] == HORIZONTE_VACIO and self.AGDEVS[i] is None:
+                    self.DEVATENCIONIT += 1
+                    trabajo.tomadoPorDev = True
                     return i
             return -1
 
@@ -214,14 +229,19 @@ class SimuladorMesaAyuda:
             for i in range(self.cantidad_operadores_tecnico):
                 if self.TPSTEC[i] == HORIZONTE_VACIO and self.AGTEC[i] is None:
                     return i
+            for i in range(self.cantidad_operadores_dev):
+                if self.TPSDEVS[i] == HORIZONTE_VACIO and self.AGDEVS[i] is None:
+                    self.DEVATENCIONTEC += 1
+                    trabajo.tomadoPorDev = True
+                    return i
             return -1
-
+        
         for i in range(self.cantidad_operadores_dev):
             if self.TPSDEVS[i] == HORIZONTE_VACIO and self.AGDEVS[i] is None:
                 return i
         return -1
 
-    def _buscar_operador_para_agendar(self, tipo_servicio: str) -> int:
+    def _buscar_operador_para_agendar(self, tipo_servicio: str, tiempo_arribo_minutos) -> int:
         """
         Se agenda SOLO si el operador está ocupado (TPS != HV) y su slot está libre.
         Elegimos el que termina antes (menor TPS).
@@ -236,6 +256,11 @@ class SimuladorMesaAyuda:
                 if ocupado and slot_libre and self.TPSIT[i] < mejor_tps:
                     mejor_tps = self.TPSIT[i]
                     mejor_indice = i
+            
+            if mejor_tps-tiempo_arribo_minutos>30 and self.rng.random() < 0.5:
+                self.PERDIDATIEMPOMAS30IT += 1
+                return -1
+            
             return mejor_indice
 
         if tipo_servicio == "TEC":
@@ -245,6 +270,10 @@ class SimuladorMesaAyuda:
                 if ocupado and slot_libre and self.TPSTEC[i] < mejor_tps:
                     mejor_tps = self.TPSTEC[i]
                     mejor_indice = i
+            
+            if mejor_tps-tiempo_arribo_minutos>30 and self.rng.random() < 0.5:
+                self.PERDIDATIEMPOMAS30TEC += 1
+                return -1        
             return mejor_indice
 
         for i in range(self.cantidad_operadores_dev):
@@ -258,31 +287,31 @@ class SimuladorMesaAyuda:
     # -----------------------------
     # Acciones sobre eventos
     # -----------------------------
-    def _iniciar_servicio(self, tiempo_actual_min: float, trabajo: Trabajo, indice_operador: int):
+    def _iniciar_servicio(self, tiempo_actual_minutos: float, trabajo: Trabajo, indice_operador: int):
         """
         Arranca servicio:
         - normaliza inicio a horario laboral
         - acumula espera
         - programa el fin del servicio en TPS = inicio + duracion (en tiempo laboral)
         """
-        inicio_servicio = normalizar_a_horario_laboral(tiempo_actual_min)
+        inicio_servicio = normalizar_a_horario_laboral(tiempo_actual_minutos)
 
-        espera = inicio_servicio - trabajo.tiempo_arribo_min
+        espera = inicio_servicio - trabajo.tiempo_arribo_minutos
         self.suma_espera_por_tipo_min[trabajo.tipo_servicio] += espera
 
-        fin_servicio = sumar_minutos_laborales(inicio_servicio, trabajo.duracion_servicio_min)
+        fin_servicio = sumar_minutos_laborales(inicio_servicio, trabajo.duracion_servicio_minutos)
 
-        if trabajo.tipo_servicio == "IT":
+        if trabajo.tipo_servicio == "IT" and trabajo.tomadoPorDev == False:
             self.TPSIT[indice_operador] = fin_servicio
-        elif trabajo.tipo_servicio == "TEC":
+        elif trabajo.tipo_servicio == "TEC" and trabajo.tomadoPorDev == False:
             self.TPSTEC[indice_operador] = fin_servicio
         else:
             self.TPSDEVS[indice_operador] = fin_servicio
-
+            self.TIPO_EN_SERVICIO_DEV[indice_operador] = trabajo.tipo_servicio
         if self.debug:
             print(
                 f"[INICIO] {trabajo.tipo_servicio} op={indice_operador} "
-                f"arribo={formatear_tiempo(trabajo.tiempo_arribo_min)} "
+                f"arribo={formatear_tiempo(trabajo.tiempo_arribo_minutos)} "
                 f"inicio={formatear_tiempo(inicio_servicio)} "
                 f"fin={formatear_tiempo(fin_servicio)}"
             )
@@ -298,10 +327,10 @@ class SimuladorMesaAyuda:
         if self.debug:
             print(
                 f"[AGENDA] {tipo_servicio} op={indice_operador} "
-                f"arribo={formatear_tiempo(trabajo.tiempo_arribo_min)}"
+                f"arribo={formatear_tiempo(trabajo.tiempo_arribo_minutos)}"
             )
 
-    def _procesar_arribo(self, tiempo_arribo_min: float):
+    def _procesar_arribo(self, tiempo_arribo_minutos: float):
         """
         ARRIBO:
         - sortea tipo
@@ -310,21 +339,41 @@ class SimuladorMesaAyuda:
         """
         tipo = self._sortear_tipo_servicio()
         duracion = self._obtener_duracion_servicio_minutos(tipo)
-        trabajo = Trabajo(tiempo_arribo_min=tiempo_arribo_min, tipo_servicio=tipo, duracion_servicio_min=duracion)
+        trabajo = Trabajo(tiempo_arribo_minutos=tiempo_arribo_minutos, tipo_servicio=tipo, duracion_servicio_minutos=duracion)
 
-        indice_libre = self._buscar_operador_libre(tipo)
+        indice_libre = self._buscar_operador_libre(trabajo)
         if indice_libre != -1:
-            self._iniciar_servicio(tiempo_arribo_min, trabajo, indice_libre)
+            self._iniciar_servicio(tiempo_arribo_minutos, trabajo, indice_libre)
             return
 
-        indice_para_agendar = self._buscar_operador_para_agendar(tipo)
+        indice_para_agendar = self._buscar_operador_para_agendar(tipo, tiempo_arribo_minutos)
         if indice_para_agendar != -1:
             self._agendar_trabajo(tipo, indice_para_agendar, trabajo)
             return
 
         self.perdidos_por_tipo[tipo] += 1
         if self.debug:
-            print(f"[PERDIDO] {tipo} arribo={formatear_tiempo(tiempo_arribo_min)}")
+            print(f"[PERDIDO] {tipo} arribo={formatear_tiempo(tiempo_arribo_minutos)}")
+
+    def _procesar_pendiente(self, indicePendiente: int, tiempo):
+        """
+        PENDIENTE:
+        - se sabe el tiempo que tarda la tarea
+        - intenta atender / perder
+        """
+        trabajo = self.TrabajoPendiente[indicePendiente]
+
+        tipo = trabajo.tipo_servicio
+        tiempo_arribo_minutos = trabajo.tiempo_arribo_minutos
+
+        indice_libre = self._buscar_operador_libre(trabajo)
+        if indice_libre != -1:
+            self._iniciar_servicio(tiempo_arribo_minutos, trabajo, indice_libre)
+            return
+
+        self.perdidos_por_tipo[tipo] += 1
+        if self.debug:
+            print(f"[PERDIDO] {tipo} arribo={formatear_tiempo(tiempo_arribo_minutos)}")
 
     def _procesar_salida(self, tiempo_salida_min: float, tipo: str, indice_operador: int):
         """
@@ -333,10 +382,13 @@ class SimuladorMesaAyuda:
         - si tenía agendado -> lo inicia (no queda libre)
         - si no -> queda libre
         """
-        self.atendidos_por_tipo[tipo] += 1
-
+        tipo_atendido = tipo
+        if(tipo is not None and tipo == "DEV"):
+            tipo_atendido = self.TIPO_EN_SERVICIO_DEV[indice_operador] or "DEV"
+            self.TIPO_EN_SERVICIO_DEV[indice_operador] = None
+        self.atendidos_por_tipo[tipo_atendido] += 1
         if self.debug:
-            print(f"[FIN] {tipo} op={indice_operador} tiempo={formatear_tiempo(tiempo_salida_min)}")
+            print(f"[FIN] pool={tipo} op={indice_operador} atendio={tipo_atendido} ...")
 
         if tipo == "IT":
             self.TPSIT[indice_operador] = HORIZONTE_VACIO
@@ -367,6 +419,8 @@ class SimuladorMesaAyuda:
         Simula 'dias' jornadas laborales completas.
         Arribos y servicios se programan en tiempo laboral (saltando la noche).
         """
+        if dias < 1:
+            raise ValueError("dias debe ser >= 1")
         tiempo_inicio_sim = 0 * MINUTOS_POR_DIA + INICIO_TURNO_MIN
         tiempo_fin_sim = (dias - 1) * MINUTOS_POR_DIA + FIN_TURNO_MIN  # fin del último día
 
