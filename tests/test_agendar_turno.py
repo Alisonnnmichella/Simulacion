@@ -12,7 +12,7 @@ def crear_simulador_dummy(cantidad_it, cantidad_tec, cantidad_dev) -> SimuladorM
         cantidad_operadores_it=cantidad_it,
         cantidad_operadores_tecnico=cantidad_tec,
         cantidad_operadores_dev=cantidad_dev,
-        muestrear_interarribo_min=interarribo_dummy,
+        muestrear_interarribo_minutos_it=interarribo_dummy,
         muestrear_duracion_servicio_min=duracion_dummy,
         seed=123,
         debug=False,

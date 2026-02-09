@@ -14,7 +14,7 @@ def crear_simulador_dummy() -> SimuladorMesaAyuda:
         cantidad_operadores_it=1,
         cantidad_operadores_tecnico=1,
         cantidad_operadores_dev=1,
-        muestrear_interarribo_min=interarribo_dummy,
+        muestrear_interarribo_minutos_it=interarribo_dummy,
         muestrear_duracion_servicio_min=duracion_dummy,
         seed=123,
         debug=False,

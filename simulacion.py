@@ -114,20 +114,20 @@ class SimuladorMesaAyuda:
         cantidad_operadores_it: int,
         cantidad_operadores_tecnico: int,
         cantidad_operadores_dev: int,
-        muestrear_interarribo_min: Callable[[random.Random], float],
-        muestrear_duracion_servicio_min: Callable[[str, random.Random], float],
+        muestrear_interarribo_minutos_it: Callable[[random.Random], float],
+        muestrear_interarribo_minutos_tec: Callable[[random.Random], float],
+        muestrear_interarribo_minutos_dev: Callable[[random.Random], float],
         seed: int = 1,
         debug: bool = False,
     ):
         self.rng = random.Random(seed)
         self.debug = debug
-
         self.cantidad_operadores_it = cantidad_operadores_it
         self.cantidad_operadores_tecnico = cantidad_operadores_tecnico
         self.cantidad_operadores_dev = cantidad_operadores_dev
 
         # Wrappers inyectados (los vas a cambiar después)
-        self.muestrear_interarribo_min = muestrear_interarribo_min
+        self.muestrear_interarribo_min = muestrear_interarribo_minutos_it
         self.muestrear_duracion_servicio_min = muestrear_duracion_servicio_min
 
         # Vectores TPS (fin de servicio por operador)
@@ -411,6 +411,11 @@ class SimuladorMesaAyuda:
             if trabajo_agendado is not None:
                 self._iniciar_servicio(tiempo_salida_min, trabajo_agendado, indice_operador)
 
+    def _elegir_siguiente_arribo(self) -> Tuple[float, str]:
+        prioridad = {"IT": 0, "TEC": 1, "DEV": 2}
+        tipo_min = min(self.TPLL.keys(), key=lambda t: (self.TPLL[t], prioridad[t]))
+        return self.TPLL[tipo_min], tipo_min
+
     # -----------------------------
     # Loop principal: próximo evento
     # -----------------------------
@@ -427,25 +432,30 @@ class SimuladorMesaAyuda:
         T = tiempo_inicio_sim
 
         # TPLL inicial: se suma interarribo en TIEMPO LABORAL
-        TPLL = sumar_minutos_laborales(T, self._obtener_siguiente_interarribo_minutos())
-
+        self.TPLL["IT"]   = sumar_minutos_laborales(T, inter_it(T)/factor)
+        self.TPLL["TEC"]   = sumar_minutos_laborales(T, inter_tec(T)/factor)
+        self.TPLL["DEV"]  = sumar_minutos_laborales(T, inter_dev(T)/factor)
         if self.debug:
-            print(f"Inicio sim: {formatear_tiempo(T)} | Primer TPLL: {formatear_tiempo(TPLL)}")
+            print(f"Inicio sim: {formatear_tiempo(T)} | Primer TPLL: {formatear_tiempo(self.TPLL['IT'])}, {formatear_tiempo(self.TPLL['TEC'])}, {formatear_tiempo(self.TPLL['DEV'])}")
+            print(f"Primer TPLLIT: {formatear_tiempo(self.TPLL['IT'])}, {formatear_tiempo(self.TPLL['IT'])}, {formatear_tiempo(self.TPLL['DEV'])}")
+            print(f"Primer TPLLTEC: {formatear_tiempo(self.TPLL['TEC'])}, {formatear_tiempo(self.TPLL['TEC'])}, {formatear_tiempo(self.TPLL['DEV'])}")
+            print(f"Primer TPLLDEV: {formatear_tiempo(self.TPLL['DEV'])}, {formatear_tiempo(self.TPLL['DEV'])}, {formatear_tiempo(self.TPLL['DEV'])}")
 
         while T < tiempo_fin_sim:
             min_trabajo_programado, tipo_salida, idx_operador = self._elegir_siguiente_salida()
+            min_arribo, tipo_min = self._elegir_siguiente_arribo()
 
             # Decisión de cátedra:
             # Si TPLL >= minTiempoTrabajoProgramado -> SALIDA
-            if min_trabajo_programado != HORIZONTE_VACIO and TPLL >= min_trabajo_programado:
+            if min_trabajo_programado != HORIZONTE_VACIO and min_arribo >= min_trabajo_programado:
                 T = min_trabajo_programado
                 self._procesar_salida(T, tipo_salida, idx_operador)
             else:
-                T = TPLL
+                T = min_arribo
                 self._procesar_arribo(T)
-
                 # Programar próximo arribo en tiempo laboral
-                TPLL = sumar_minutos_laborales(T, self._obtener_siguiente_interarribo_minutos())
+                self.TPLL[tipo_min] = sumar_minutos_laborales(T, self._obtener_interarribo_por_tipo(tipo_min))
+   
 
         espera_promedio = {
             tipo: (self.suma_espera_por_tipo_min[tipo] / self.atendidos_por_tipo[tipo])
