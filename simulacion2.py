@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from simulacion import formatear_tiempo
 
@@ -112,6 +112,8 @@ class Simulacion:
             "DEV": 0
         }
         self.maximoNumeroDePersonasAtendidasPorDia=0
+        self.TIPO_EN_SERVICIO_DEV: List[Optional[str]] = [None] * self.cantidad_operadores_dev
+
         
 
 
@@ -128,17 +130,17 @@ class Simulacion:
             return min_dev, "DEV", self.TPSDEV.index(min_dev)
 
 
-    def _elegir_siguiente_entrada(self) -> Tuple[float, str, int]:
+    def _elegir_siguiente_entrada(self) -> Tuple[float, str]:
         min_it = min(self.TPLLIT) if self.cantidad_operadores_it > 0 else HORIZONTE_VACIO
         min_app = min(self.TPLLAPP) if self.cantidad_operadores_app > 0 else HORIZONTE_VACIO
         min_dev = min(self.TPLLDEV) if self.cantidad_operadores_dev > 0 else HORIZONTE_VACIO
 
         if min_it <= min_app and min_it <= min_dev:
-            return min_it, "IT", self.TPLLIT.index(min_it)
+            return min_it, "IT"
         elif min_app <= min_it and min_app <= min_dev:
-            return min_app, "APP", self.TPLLAPP.index(min_app)
+            return min_app, "APP"
         else:
-            return min_dev, "DEV", self.TPLLDEV.index(min_dev)
+            return min_dev, "DEV"
 
     def _minutos_del_dia(tiempoActual:float) -> float:
         minutos_dia = tiempoActual % 1440  # 1440 minutos en un día (24 horas * 60 minutos)
@@ -149,22 +151,27 @@ class Simulacion:
         finalDelDiaEnMinutosAbsolutos = dia*1440+HORA_FINAL_DE_TRABAJO*60
         return finalDelDiaEnMinutosAbsolutos
     
+    def minuto_siguiente_dia_laboral(self , tiempoActual:float) -> float:
+        dia = tiempoActual // 1440
+        return dia*1440+HORA_INICIO_LABORAL*60
+    
     # necesito que si pasa de un dia  me devuelva el tiempo de fin de la tarea respecto a lo que lleve dentro del horario laboral, seria tiempo actual + tiempo total pero dentro de horario laboral algo que quizas dure 25 horas en lugar de ser un dia y una hora seria 
     # del resto del dia tomo lo que resta se lo resto a la duracion de la tarea y despues de lo que resta de la tarea lo divido en la cantidad de horas laborales para saber cuantos dias lleva
     # y con el modulo se cuantos minutos lleva del ultimo dia y se lo sumo al tiempo actual
-    def determinarTiempoDeFinDeTarea(self,tiempoActual:float, tiempoDeAtencion:float) -> float:
+    def finDeTareaEnHorarioLaboral(self,tiempoActual:float, tiempoDeAtencion:float) -> float:
         finDelDiaEnMinutosAbsolutos = self._fin_del_dia_en_minutos_absolutos(tiempoActual)       
         if(tiempoActual+tiempoDeAtencion <= finDelDiaEnMinutosAbsolutos):
             return tiempoActual+tiempoDeAtencion
         restoDelDia = finDelDiaEnMinutosAbsolutos - tiempoActual
         restoDeLaTarea = tiempoDeAtencion - restoDelDia
         minutosLaboralesPorDia = (HORA_FINAL_DE_TRABAJO-HORA_INICIO_LABORAL)*60
+        #cuantos dias completos tiene una tarea
         diasRestantes = restoDeLaTarea // minutosLaboralesPorDia
         minutosRestantesDelUltimoDia = restoDeLaTarea % minutosLaboralesPorDia
-        diaActual = tiempoActual // 1440
+        diaSiguiente = (tiempoActual // 1440)+1
         if(minutosRestantesDelUltimoDia == 0):
-            return (diaActual+diasRestantes)*1440
-        return (diaActual+diasRestantes)*1440 + HORA_INICIO_LABORAL*60+minutosRestantesDelUltimoDia
+            return (diaSiguiente+diasRestantes)*1440
+        return (diaSiguiente+diasRestantes)*1440 + HORA_INICIO_LABORAL*60+minutosRestantesDelUltimoDia
     
     def _obtener_interarribo_por_tipo(self, tipo:str) -> float:
         if tipo == "IT":
@@ -194,6 +201,8 @@ class Simulacion:
         self.TPSIT =  [HORIZONTE_VACIO] * self.cantidad_operadores_it
         self.TPSAPP = [HORIZONTE_VACIO] * self.cantidad_operadores_app
         self.TPSDEV = [HORIZONTE_VACIO] * self.cantidad_operadores_dev
+        self.TIPO_EN_SERVICIO_DEV: List[Optional[str]] = [None] * self.cantidad_operadores_dev
+
     
     def _buscar_operador_libre(self, trabajo: Trabajo) -> int:
         """
@@ -237,21 +246,79 @@ class Simulacion:
         - sortea duración de servicio del trabajo
         - intenta atender / agendar / perder
         """
+        self.programar_tiempo_de_proximo_arribo(tipo)
 
-        indice_libre = self._buscar_operador_libre(tipo)
+        trabajo = Trabajo(
+            tiempo_arribo_minutos=tiempo_arribo_minutos,
+            tipo_servicio=tipo,
+            duracion_servicio_minutos= 0,
+            tomadoPorDev=False)
+        indice_libre = self._buscar_operador_libre(trabajo)
+
         if indice_libre != -1:
             self.personasAtendidasPorTipo[tipo] += 1
-            self._iniciar_servicio(tiempo_arribo_minutos, trabajo, indice_libre)
+            self._iniciar_servicio(tiempo_arribo_minutos,trabajo, indice_libre)
             return
 
         indice_para_agendar = self._buscar_operador_para_agendar(tipo, tiempo_arribo_minutos)
         if indice_para_agendar != -1:
+            self.personasAtendidasPorTipo[tipo] += 1
             self._agendar_trabajo(tipo, indice_para_agendar, trabajo)
             return
 
         self.perdidos_por_tipo[tipo] += 1
+
         if self.debug:
             print(f"[PERDIDO] {tipo} arribo={formatear_tiempo(tiempo_arribo_minutos)}")
+
+    def _buscar_operador_para_agendar(self, tipo_servicio: str, tiempo_arribo_minutos) -> int:
+        """
+        Se agenda SOLO si el operador está ocupado (TPS != HV) y su slot está libre.
+        Elegimos el que termina antes (menor TPS).
+        """
+        mejor_indice = -1
+        mejor_tps = HORIZONTE_VACIO
+
+        if tipo_servicio == "IT":
+            for i in range(self.cantidad_operadores_it):
+                ocupado = self.TPSIT[i] != HORIZONTE_VACIO
+                slot_libre = self.AGIT[i] is None
+                if ocupado and slot_libre and self.TPSIT[i] < mejor_tps:
+                    mejor_tps = self.TPSIT[i]
+                    mejor_indice = i
+            
+            if mejor_tps-tiempo_arribo_minutos>30 and self.rng.random() < 0.5:
+                self.PERDIDATIEMPOMAS30IT += 1
+                return -1
+            
+            return mejor_indice
+
+        if tipo_servicio == "TEC":
+            for i in range(self.cantidad_operadores_tecnico):
+                ocupado = self.TPSTEC[i] != HORIZONTE_VACIO
+                slot_libre = self.AGTEC[i] is None
+                if ocupado and slot_libre and self.TPSTEC[i] < mejor_tps:
+                    mejor_tps = self.TPSTEC[i]
+                    mejor_indice = i
+            
+            if mejor_tps-tiempo_arribo_minutos>30 and self.rng.random() < 0.5:
+                self.PERDIDATIEMPOMAS30TEC += 1
+                return -1        
+            return mejor_indice
+
+        for i in range(self.cantidad_operadores_dev):
+            ocupado = self.TPSDEVS[i] != HORIZONTE_VACIO
+            slot_libre = self.AGDEVS[i] is None
+            if ocupado and slot_libre and self.TPSDEVS[i] < mejor_tps:
+                mejor_tps = self.TPSDEVS[i]
+                mejor_indice = i
+        return mejor_indice
+
+    def programar_tiempo_de_proximo_arribo(self, tipo: str) -> None:
+        tiempoActual = self.tiempoActual
+        if tipo == "IT":            self.TPLL_por_tipo["IT"] = tiempoActual + self._obtener_interarribo_por_tipo("IT")
+        elif tipo == "APP":         self.TPLL_por_tipo["APP"] = tiempoActual + self._obtener_interarribo_por_tipo("APP")
+        elif tipo == "DEV":         self.TPLL_por_tipo["DEV"] = tiempoActual + self._obtener_interarribo_por_tipo("DEV")
 
     def _iniciar_servicio(self, tiempo_actual_minutos: float, trabajo: Trabajo, indice_operador: int):
         """
@@ -261,33 +328,30 @@ class Simulacion:
         - programa el fin del servicio en TPS = inicio + duracion (en tiempo laboral)
         """
         duracionDeAtencion = self._obtener_duracion_servicio_por_tipo(trabajo.tipo_servicio)
-        determinarTiempoDeFinDeTarea = self.determinarTiempoDeFinDeTarea(tiempo_actual_minutos, duracionDeAtencion)
+        fin_servicio = self.finDeTareaEnHorarioLaboral(tiempo_actual_minutos, duracionDeAtencion)
 
         if trabajo.tipo_servicio == "IT" and trabajo.tomadoPorDev == False:
             self.TPSIT[indice_operador] = fin_servicio
-        elif trabajo.tipo_servicio == "TEC" and trabajo.tomadoPorDev == False:
-            self.TPSTEC[indice_operador] = fin_servicio
+        elif trabajo.tipo_servicio == "APP" and trabajo.tomadoPorDev == False:
+            self.TPSAPP[indice_operador] = fin_servicio
         else:
-            self.TPSDEVS[indice_operador] = fin_servicio
+            self.TPSDEV[indice_operador] = fin_servicio
             self.TIPO_EN_SERVICIO_DEV[indice_operador] = trabajo.tipo_servicio
         if self.debug:
             print(
                 f"[INICIO] {trabajo.tipo_servicio} op={indice_operador} "
                 f"arribo={formatear_tiempo(trabajo.tiempo_arribo_minutos)} "
-                f"inicio={formatear_tiempo(inicio_servicio)} "
+                f"inicio={formatear_tiempo(tiempo_actual_minutos)} "
                 f"fin={formatear_tiempo(fin_servicio)}"
             )
-
-
 
     def _iniciar_simulacion(self):
         self.inicioVariablesSimulacion()
         while(self.tiempoActual < self.tiempoFinalSimulacion):
             min_trabajo_programado, tipo_salida, indice_operador = self._elegir_siguiente_salida()
-            min_arribo, tipo_arribo, indice_operador_entrada = self._elegir_siguiente_entrada()
+            min_arribo, tipo_arribo = self._elegir_siguiente_entrada()
             if min_arribo <= min_trabajo_programado:
-                self._procesar_arribo(min_arribo, tipo_arribo,indice_operador_entrada)
-
+                self._procesar_arribo(min_arribo, tipo_arribo)
             else:
                 self._procesar_salida(min_trabajo_programado, tipo_salida, indice_operador)
 
